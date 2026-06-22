@@ -54,3 +54,8 @@ buildkitd.toml
 compose-test.yaml
 SmartGallery
 temp
+
+# files I added to use uv for managing the python venv
+.python-version
+uv.lock
+pyproject.toml
