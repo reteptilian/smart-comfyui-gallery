@@ -1,0 +1,408 @@
+<!-- FULLSCREEN SLIDESHOW MODULE -->
+<style>
+    #slideshow-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 12000;
+        display: none;
+        background: #000;
+        color: #fff;
+        overflow: hidden;
+    }
+
+    #slideshow-overlay.visible {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    #slideshow-stage {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 76px 88px 84px;
+        box-sizing: border-box;
+    }
+
+    #slideshow-image {
+        display: block;
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
+        user-select: none;
+        -webkit-user-drag: none;
+        opacity: 0;
+        transition: opacity 180ms ease;
+    }
+
+    #slideshow-image.loaded {
+        opacity: 1;
+    }
+
+    #slideshow-loader {
+        position: absolute;
+        width: 44px;
+        height: 44px;
+        border: 4px solid rgba(255,255,255,.18);
+        border-top-color: var(--primary-color);
+        border-radius: 50%;
+        animation: slideshow-spin .8s linear infinite;
+    }
+
+    @keyframes slideshow-spin {
+        to { transform: rotate(360deg); }
+    }
+
+    .slideshow-topbar,
+    .slideshow-controls {
+        position: absolute;
+        left: 0;
+        right: 0;
+        z-index: 2;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 14px 20px;
+        background: linear-gradient(to bottom, rgba(0,0,0,.82), rgba(0,0,0,.25));
+    }
+
+    .slideshow-topbar {
+        top: 0;
+        justify-content: space-between;
+    }
+
+    .slideshow-controls {
+        bottom: 0;
+        justify-content: center;
+        background: linear-gradient(to top, rgba(0,0,0,.88), rgba(0,0,0,.18));
+    }
+
+    #slideshow-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: .95rem;
+    }
+
+    #slideshow-counter {
+        flex-shrink: 0;
+        color: #aaa;
+        font-family: monospace;
+    }
+
+    .slideshow-btn {
+        min-width: 44px;
+        height: 42px;
+        padding: 0 13px;
+        border: 1px solid rgba(255,255,255,.28);
+        border-radius: 9px;
+        background: rgba(255,255,255,.1);
+        color: #fff;
+        cursor: pointer;
+        font-size: 1rem;
+    }
+
+    .slideshow-btn:hover {
+        background: rgba(255,255,255,.22);
+    }
+
+    .slideshow-btn.active {
+        color: var(--primary-color);
+        border-color: var(--primary-color);
+    }
+
+    .slideshow-nav {
+        position: absolute;
+        z-index: 3;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 58px;
+        height: 72px;
+        border: 1px solid rgba(255,255,255,.2);
+        border-radius: 12px;
+        background: rgba(0,0,0,.48);
+        color: white;
+        cursor: pointer;
+        font-size: 2.4rem;
+    }
+
+    #slideshow-prev { left: 18px; }
+    #slideshow-next { right: 18px; }
+
+    #slideshow-ui-show {
+        position: absolute;
+        right: 16px;
+        bottom: 16px;
+        z-index: 4;
+        display: none;
+    }
+
+    #slideshow-interval {
+        width: 68px;
+        height: 38px;
+        padding: 0 8px;
+        box-sizing: border-box;
+        border: 1px solid rgba(255,255,255,.28);
+        border-radius: 8px;
+        background: #111;
+        color: #fff;
+        text-align: center;
+    }
+
+    .slideshow-timing-label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: #bbb;
+        font-size: .82rem;
+    }
+
+    @media (max-width: 640px) {
+        #slideshow-stage { padding: 64px 48px 82px; }
+        .slideshow-nav { width: 40px; height: 58px; font-size: 1.8rem; }
+        #slideshow-prev { left: 4px; }
+        #slideshow-next { right: 4px; }
+        .slideshow-topbar { padding: 10px 12px; }
+        .slideshow-controls { padding: 10px 8px; gap: 6px; }
+        .slideshow-btn { min-width: 40px; padding: 0 9px; }
+        .slideshow-timing-label span { display: none; }
+    }
+</style>
+
+<div id="slideshow-overlay" aria-hidden="true">
+    <div class="slideshow-topbar">
+        <div id="slideshow-title"></div>
+        <div style="display:flex;align-items:center;gap:10px;">
+            <span id="slideshow-counter"></span>
+            <button class="slideshow-btn" type="button" onclick="closeSlideshow()" title="Close slideshow (Esc)">×</button>
+        </div>
+    </div>
+
+    <div id="slideshow-stage">
+        <div id="slideshow-loader"></div>
+        <img id="slideshow-image" alt="">
+    </div>
+
+    <button id="slideshow-prev" class="slideshow-nav" type="button" onclick="slideshowNavigate(-1)" title="Previous image">‹</button>
+    <button id="slideshow-next" class="slideshow-nav" type="button" onclick="slideshowNavigate(1)" title="Next image">›</button>
+
+    <div class="slideshow-controls">
+        <button id="slideshow-play" class="slideshow-btn" type="button" onclick="toggleSlideshowPlayback()" title="Play slideshow">▶</button>
+        <label class="slideshow-timing-label">
+            <span>Advance every</span>
+            <input id="slideshow-interval" type="number" min="1" max="120" step="1" value="5" onchange="updateSlideshowInterval()">
+            <span>seconds</span>
+        </label>
+        <button class="slideshow-btn" type="button" onclick="toggleSlideshowInfo()" title="Show or hide filename and controls">👁</button>
+    </div>
+    <button id="slideshow-ui-show" class="slideshow-btn" type="button" onclick="toggleSlideshowInfo()" title="Show slideshow controls">👁</button>
+</div>
+
+<script>
+    let slideshowItems = [];
+    let slideshowIndex = 0;
+    let slideshowTimer = null;
+    let slideshowPlaying = false;
+    let slideshowLoadToken = 0;
+    let slideshowUiVisible = true;
+
+    function slideshowIsOpen() {
+        return document.getElementById('slideshow-overlay').classList.contains('visible');
+    }
+
+    async function openSlideshow() {
+        const overlay = document.getElementById('slideshow-overlay');
+        slideshowUiVisible = true;
+        overlay.querySelector('.slideshow-topbar').style.display = 'flex';
+        overlay.querySelector('.slideshow-controls').style.display = 'flex';
+        document.getElementById('slideshow-ui-show').style.display = 'none';
+        overlay.classList.add('visible');
+        overlay.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('modal-open');
+
+        const interval = parseInt(localStorage.getItem('sg_slideshow_interval') || '5', 10);
+        document.getElementById('slideshow-interval').value = Math.min(120, Math.max(1, interval || 5));
+
+        if (overlay.requestFullscreen && !document.fullscreenElement) {
+            try {
+                await overlay.requestFullscreen();
+            } catch (error) {
+                // Fullscreen can be blocked by browser policy; the fixed overlay remains usable.
+            }
+        }
+
+        document.getElementById('slideshow-title').textContent = 'Loading current gallery view…';
+        document.getElementById('slideshow-counter').textContent = '';
+        document.getElementById('slideshow-image').classList.remove('loaded');
+        document.getElementById('slideshow-loader').style.display = 'block';
+
+        try {
+            const response = await fetch('/galleryout/api/current_view_slideshow');
+            const data = await response.json();
+            if (!response.ok || data.status !== 'success') {
+                throw new Error(data.message || 'Unable to load slideshow.');
+            }
+            slideshowItems = data.items || [];
+            if (!slideshowItems.length) {
+                closeSlideshow();
+                if (typeof showNotification === 'function') {
+                    showNotification('No images are available in the current filtered view.', 'info');
+                }
+                return;
+            }
+
+            const currentId = window.currentLightboxFile && window.currentLightboxFile.id;
+            const currentIndex = currentId
+                ? slideshowItems.findIndex(item => item.id === currentId)
+                : -1;
+            slideshowIndex = currentIndex >= 0 ? currentIndex : 0;
+            slideshowPlaying = false;
+            updateSlideshowPlayButton();
+            showSlideshowItem();
+        } catch (error) {
+            closeSlideshow();
+            if (typeof showNotification === 'function') {
+                showNotification(error.message || 'Unable to start slideshow.', 'error');
+            }
+        }
+    }
+
+    function closeSlideshow() {
+        stopSlideshowTimer();
+        slideshowPlaying = false;
+        slideshowItems = [];
+        const overlay = document.getElementById('slideshow-overlay');
+        overlay.classList.remove('visible');
+        overlay.setAttribute('aria-hidden', 'true');
+        document.body.classList.remove('modal-open');
+        document.getElementById('slideshow-image').removeAttribute('src');
+        if (document.fullscreenElement === overlay && document.exitFullscreen) {
+            document.exitFullscreen().catch(() => {});
+        }
+    }
+
+    function showSlideshowItem(failedAttempts = 0) {
+        if (!slideshowItems.length || !slideshowIsOpen()) return;
+        const item = slideshowItems[slideshowIndex];
+        const image = document.getElementById('slideshow-image');
+        const loader = document.getElementById('slideshow-loader');
+        const token = ++slideshowLoadToken;
+
+        image.classList.remove('loaded');
+        loader.style.display = 'block';
+        document.getElementById('slideshow-title').textContent = item.name || 'Untitled';
+        document.getElementById('slideshow-counter').textContent = `${slideshowIndex + 1} / ${slideshowItems.length}`;
+
+        image.onload = () => {
+            if (token !== slideshowLoadToken) return;
+            loader.style.display = 'none';
+            image.classList.add('loaded');
+            scheduleSlideshowAdvance();
+        };
+        image.onerror = () => {
+            if (token !== slideshowLoadToken) return;
+            if (failedAttempts + 1 >= slideshowItems.length) {
+                loader.style.display = 'none';
+                document.getElementById('slideshow-title').textContent = 'No slideshow images could be loaded.';
+                stopSlideshowTimer();
+                slideshowPlaying = false;
+                updateSlideshowPlayButton();
+                return;
+            }
+            slideshowIndex = (slideshowIndex + 1) % slideshowItems.length;
+            showSlideshowItem(failedAttempts + 1);
+        };
+        image.alt = item.name || '';
+        image.src = `/galleryout/file/${item.id}`;
+    }
+
+    function slideshowNavigate(direction) {
+        if (!slideshowItems.length) return;
+        stopSlideshowTimer();
+        slideshowIndex = (slideshowIndex + direction + slideshowItems.length) % slideshowItems.length;
+        showSlideshowItem();
+    }
+
+    function toggleSlideshowPlayback() {
+        slideshowPlaying = !slideshowPlaying;
+        updateSlideshowPlayButton();
+        if (slideshowPlaying) {
+            scheduleSlideshowAdvance();
+        } else {
+            stopSlideshowTimer();
+        }
+    }
+
+    function updateSlideshowPlayButton() {
+        const button = document.getElementById('slideshow-play');
+        button.textContent = slideshowPlaying ? '❚❚' : '▶';
+        button.title = slideshowPlaying ? 'Pause slideshow' : 'Play slideshow';
+        button.classList.toggle('active', slideshowPlaying);
+    }
+
+    function updateSlideshowInterval() {
+        const input = document.getElementById('slideshow-interval');
+        const value = Math.min(120, Math.max(1, parseInt(input.value, 10) || 5));
+        input.value = value;
+        localStorage.setItem('sg_slideshow_interval', String(value));
+        if (slideshowPlaying) scheduleSlideshowAdvance();
+    }
+
+    function scheduleSlideshowAdvance() {
+        stopSlideshowTimer();
+        if (!slideshowPlaying || !slideshowIsOpen()) return;
+        const seconds = Math.min(
+            120,
+            Math.max(1, parseInt(document.getElementById('slideshow-interval').value, 10) || 5)
+        );
+        slideshowTimer = window.setTimeout(() => slideshowNavigate(1), seconds * 1000);
+    }
+
+    function stopSlideshowTimer() {
+        if (slideshowTimer) {
+            clearTimeout(slideshowTimer);
+            slideshowTimer = null;
+        }
+    }
+
+    function toggleSlideshowInfo() {
+        slideshowUiVisible = !slideshowUiVisible;
+        document.querySelector('#slideshow-overlay .slideshow-topbar').style.display = slideshowUiVisible ? 'flex' : 'none';
+        document.querySelector('#slideshow-overlay .slideshow-controls').style.display = slideshowUiVisible ? 'flex' : 'none';
+        document.getElementById('slideshow-ui-show').style.display = slideshowUiVisible ? 'none' : 'block';
+    }
+
+    document.addEventListener('keydown', event => {
+        if (!slideshowIsOpen()) return;
+        if (event.key === 'ArrowLeft') {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            slideshowNavigate(-1);
+        } else if (event.key === 'ArrowRight') {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            slideshowNavigate(1);
+        } else if (event.key === ' ' || event.code === 'Space') {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            toggleSlideshowPlayback();
+        } else if (event.key === 'h' || event.key === 'H') {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            toggleSlideshowInfo();
+        } else if (event.key === 'Escape' && !document.fullscreenElement) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            closeSlideshow();
+        }
+    }, true);
+
+    document.addEventListener('fullscreenchange', () => {
+        if (slideshowIsOpen() && !document.fullscreenElement) {
+            closeSlideshow();
+        }
+    });
+</script>

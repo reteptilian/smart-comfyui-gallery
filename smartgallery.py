@@ -4804,6 +4804,21 @@ def get_current_view_ids():
     ids = [f['id'] for f in gallery_view_cache]
     return jsonify({'status': 'success', 'ids': ids})
 
+@app.route('/galleryout/api/current_view_slideshow')
+def get_current_view_slideshow():
+    """Returns ordered images from the current filtered/sorted gallery view."""
+    global gallery_view_cache
+    items = [
+        {
+            'id': file_data['id'],
+            'name': file_data.get('name', ''),
+            'type': file_data.get('type', 'image'),
+        }
+        for file_data in gallery_view_cache
+        if file_data.get('type') in ('image', 'animated_image')
+    ]
+    return jsonify({'status': 'success', 'items': items})
+
 @app.route('/galleryout/load_more')
 def load_more():
     offset = request.args.get('offset', 0, type=int)

@@ -8149,6 +8149,9 @@ body.dam-mode-active .status-color-strip { display: block; }
             {% endif %}
 
             <div style="display:flex; gap:10px; margin-left:20px;">
+                <button type="button" class="glass-btn" onclick="openSlideshow()" title="Slideshow of current filtered images">
+                    ▶ Slideshow
+                </button>
                 <!-- PHYSICAL FOLDER TOOLS (Upload, Rescan, Auto-Refresh) -->
                 {% if not is_global_search and not (is_ai_search and ' ||| ' not in ai_query) and not current_folder_info.is_collection %}
                     <button type="button" id="show-upload-modal-btn" class="glass-btn">📤 Upload</button>
@@ -8259,6 +8262,7 @@ body.dam-mode-active .status-color-strip { display: block; }
 
         <!-- Row 4: Icon Toolbar (Horizontal Scroll) -->
         <div class="mobile-icon-toolbar">
+            <button type="button" onclick="openSlideshow()" class="glass-btn" title="Slideshow">▶</button>
             
             {% if not current_folder_info.is_collection %}
                 <!-- PHYSICAL TOOLS -->
@@ -9803,6 +9807,7 @@ body.dam-mode-active .status-color-strip { display: block; }
     </div>
     {% include 'modals/user_manager_module.html' %}
     {% include 'modals/remix_modal.html' %}
+    {% include 'modals/slideshow_modal.html' %}
     <script>
         // --- DATA INITIALIZATION AND GLOBAL STATE ---
         // --- GLOBAL VIEW CONTEXT (Hardcoded from server on load) ---
