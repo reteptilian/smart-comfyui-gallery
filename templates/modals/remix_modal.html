@@ -223,6 +223,7 @@
             </h3>
             <div style="display:flex; gap:8px; align-items:center;">
                 <!-- <button id="remix-mobile-help-btn" class="glass-btn" onclick="toggleRemixInfo()" style="padding: 4px 8px; height:auto; min-height:0; font-size:0.8rem;">❓ Help</button> -->
+                <button class="glass-btn" onclick="openRemixBackendManager()" style="padding:4px 10px; height:auto; min-height:0; font-size:0.8rem;">🖥 Backends & Jobs</button>
                 <button class="glass-btn" onclick="openWorkflowLibrary()" style="padding: 4px 10px; height:auto; min-height:0; font-size:0.8rem; border-color:var(--favorite-color); color:var(--favorite-color);">📂 Library</button>
                 <button class="close-btn" onclick="closeRemixModal()" style="font-size: 1.5rem; background:none; border:none; color:#888; cursor:pointer;">×</button>
             </div>
@@ -271,6 +272,34 @@
                 <input type="number" id="remix-gen-count" min="1" max="100" value="1"
                     style="width:60px; padding:4px 6px; background:#1a1a1a; border:1px solid var(--border-color); border-radius:6px; color:white; font-size:0.9rem; text-align:center;"
                     oninput="checkMultiGenWarning()">
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- SUB-MODAL: REMOTE BACKENDS AND DURABLE JOBS -->
+<div id="remix-backends-overlay" style="position:fixed; inset:0; background:rgba(0,0,0,.95); z-index:10650; display:none; justify-content:center; align-items:center;">
+    <div class="remix-library-panel" style="width:950px; max-width:96vw; height:88vh;">
+        <div class="remix-header">
+            <h3 style="margin:0;color:white;">🖥 ComfyUI Backends & Remix Jobs</h3>
+            <button class="close-btn" onclick="closeRemixBackendManager()">×</button>
+        </div>
+        <div class="remix-body custom-scroll">
+            <div>
+                <div class="remix-section-title">Backends — fastest first</div>
+                <div style="display:grid;grid-template-columns:1fr 2fr auto;gap:8px;margin-bottom:10px;">
+                    <input id="remix-backend-new-name" class="remix-input" placeholder="Name, e.g. RTX 5090">
+                    <input id="remix-backend-new-url" class="remix-input" placeholder="http://192.168.1.50:8188">
+                    <button class="glass-btn active-blue" onclick="addRemixBackend()">Add</button>
+                </div>
+                <div id="remix-backend-list"></div>
+            </div>
+            <div style="margin-top:22px;">
+                <div class="remix-section-title">
+                    <span>Recent jobs</span>
+                    <button class="glass-btn" onclick="loadRemixJobs()" style="padding:2px 8px;">↻ Refresh</button>
+                </div>
+                <div id="remix-job-list"></div>
             </div>
         </div>
     </div>
@@ -974,23 +1003,11 @@
                 window._remixObjectInfo = null; // Reset Dictionary cache
                 const serverDefaultUrl = currentRemixData.default_comfy_url || "http://127.0.0.1:8188";
                 window._remixServerDefaultUrl = serverDefaultUrl;
-                const savedUrl = localStorage.getItem('sg_comfy_url') || serverDefaultUrl;
                 html += `
-                <div style="margin-bottom: 15px; padding: 10px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); border-radius: 8px;">
-                    <label style="font-size:0.75rem; color:var(--primary-color); font-weight:bold; display:block; margin-bottom:5px;">🔗 ComfyUI Server URL</label>
-                    <div style="display:flex; gap:6px; align-items:center;">
-                        <input type="text" id="remix-comfy-url" class="remix-input" value="${escapeHTML(savedUrl)}"
-                            style="padding: 6px 10px; flex:1;"
-                            oninput="
-                                const v = this.value.trim();
-                                if (v) localStorage.setItem('sg_comfy_url', v);
-                                else { localStorage.removeItem('sg_comfy_url'); this.value = window._remixServerDefaultUrl; }
-                            "
-                            placeholder="${escapeHTML(savedUrl)}">
-                        <button class="glass-btn" title="Reset to server default"
-                            onclick="localStorage.removeItem('sg_comfy_url'); document.getElementById('remix-comfy-url').value = window._remixServerDefaultUrl;"
-                            style="padding:4px 8px; height:auto; min-height:0; font-size:0.8rem; white-space:nowrap;">↺ Reset</button>
-                    </div>
+                <div style="margin-bottom:15px;padding:10px;background:rgba(82,161,255,.08);border:1px solid rgba(82,161,255,.35);border-radius:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;">
+                    <input type="hidden" id="remix-comfy-url" value="${escapeHTML(serverDefaultUrl)}">
+                    <span style="font-size:.82rem;color:#bbb;">⚡ SmartGallery will wait locally and route this job to the fastest available backend.</span>
+                    <button class="glass-btn" onclick="openRemixBackendManager()" style="white-space:nowrap;padding:4px 9px;">Manage</button>
                 </div>`;
                 
                 const hasApi = currentRemixData.has_api;
@@ -2413,15 +2430,25 @@ function closeRemixModal() {
             });
 
             const imgInputs = document.querySelectorAll('.remix-img-field');
+            modifications.image_uploads = [];
             for (let i = 0; i < imgInputs.length; i++) {
                 if (imgInputs[i].files.length > 0) {
                     fd.append('image_upload', imgInputs[i].files[0]);
-                    modifications.image_node_id = imgInputs[i].dataset.nodeId;
-                    if (imgInputs[i].dataset.key) modifications.image_key = imgInputs[i].dataset.key;
-                    modifications.image_orig_value = imgInputs[i].dataset.origVal;
-                    if (imgInputs[i].dataset.widgetIdx !== '') modifications.image_widget_index = parseInt(imgInputs[i].dataset.widgetIdx);
-                    break;
+                    const uploadMeta = {
+                        node_id: imgInputs[i].dataset.nodeId,
+                        key: imgInputs[i].dataset.key || 'image',
+                        orig_value: imgInputs[i].dataset.origVal
+                    };
+                    if (imgInputs[i].dataset.widgetIdx !== '') uploadMeta.widget_index = parseInt(imgInputs[i].dataset.widgetIdx);
+                    modifications.image_uploads.push(uploadMeta);
                 }
+            }
+            if (modifications.image_uploads.length) {
+                const firstUpload = modifications.image_uploads[0];
+                modifications.image_node_id = firstUpload.node_id;
+                modifications.image_key = firstUpload.key;
+                modifications.image_orig_value = firstUpload.orig_value;
+                modifications.image_widget_index = firstUpload.widget_index;
             }
 
             if (window._remixCurrentView === 'raw') {
@@ -2530,8 +2557,8 @@ function closeRemixModal() {
                         if (data.status === 'success') {
                             if (i === genCount - 1) {
                                 let successMsg = genCount > 1
-                                    ? `All ${genCount} jobs successfully queued in ComfyUI!`
-                                    : (data.message || "Job successfully sent to ComfyUI!");
+                                    ? `All ${genCount} jobs added to the SmartGallery queue!`
+                                    : (data.message || "Job added to the SmartGallery queue!");
                                 if (window._remixSavePrefix) {
                                     const folder = window._remixSubFolder || 'ComfyUI root output folder';
                                     const prefix = window._remixFilePrefix || window._remixSavePrefix;
@@ -2988,6 +3015,187 @@ function closeRemixModal() {
         closeWorkflowLibrary();
         let passId = window._isToolsSession ? 'tools' : (remixTargetFile ? remixTargetFile.id : null);
         openRemixModal(passId, window._remixCompanionPath, filename);
+    }
+
+    let remixBackendRows = [];
+    let remixManagerTimer = null;
+
+    function remixManagerMessage(message, isError = false) {
+        if (typeof showNotification === 'function') {
+            showNotification(message, isError ? 'error' : 'success');
+        }
+    }
+
+    async function remixApi(url, options = {}) {
+        const response = await fetch(url, options);
+        const data = await response.json();
+        if (!response.ok || data.status === 'error') {
+            throw new Error(data.message || `Request failed (${response.status})`);
+        }
+        return data;
+    }
+
+    function openRemixBackendManager() {
+        document.getElementById('remix-backends-overlay').style.display = 'flex';
+        loadRemixBackends();
+        loadRemixJobs();
+        clearInterval(remixManagerTimer);
+        remixManagerTimer = setInterval(loadRemixJobs, 3000);
+    }
+
+    function closeRemixBackendManager() {
+        document.getElementById('remix-backends-overlay').style.display = 'none';
+        clearInterval(remixManagerTimer);
+        remixManagerTimer = null;
+    }
+
+    async function loadRemixBackends() {
+        const container = document.getElementById('remix-backend-list');
+        try {
+            const data = await remixApi('/galleryout/api/remix/backends');
+            remixBackendRows = data.backends || [];
+            if (!remixBackendRows.length) {
+                container.innerHTML = '<div style="padding:14px;color:#888;text-align:center;">No backends configured.</div>';
+                return;
+            }
+            container.innerHTML = remixBackendRows.map((backend, index) => `
+                <div style="display:grid;grid-template-columns:32px 1fr 2fr auto auto;gap:7px;align-items:center;padding:8px;background:#0c0c0c;border:1px solid #333;border-radius:7px;margin-bottom:6px;">
+                    <strong style="color:var(--primary-color);text-align:center;">${index + 1}</strong>
+                    <input id="backend-name-${backend.id}" class="remix-input" value="${escapeHTML(backend.name)}" style="padding:6px;">
+                    <input id="backend-url-${backend.id}" class="remix-input" value="${escapeHTML(backend.base_url)}" style="padding:6px;">
+                    <label style="font-size:.75rem;color:#aaa;white-space:nowrap;"><input id="backend-enabled-${backend.id}" type="checkbox" ${backend.enabled ? 'checked' : ''}> enabled</label>
+                    <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;justify-content:flex-end;">
+                        <span style="font-size:.7rem;color:${backend.health_status === 'offline' ? '#ff7777' : backend.health_status === 'busy' ? '#ffc107' : '#7ddd91'};">${escapeHTML(backend.health_status || 'unknown')}</span>
+                        <button class="glass-btn" onclick="moveRemixBackend(${index},-1)" ${index === 0 ? 'disabled' : ''} style="padding:2px 7px;">↑</button>
+                        <button class="glass-btn" onclick="moveRemixBackend(${index},1)" ${index === remixBackendRows.length - 1 ? 'disabled' : ''} style="padding:2px 7px;">↓</button>
+                        <button class="glass-btn" onclick="saveRemixBackend('${backend.id}')" style="padding:2px 7px;">Save</button>
+                        <button class="glass-btn" onclick="testRemixBackend('${backend.id}')" style="padding:2px 7px;">Test</button>
+                        <button class="glass-btn" onclick="deleteRemixBackend('${backend.id}')" style="padding:2px 7px;color:#ff7777;">×</button>
+                    </div>
+                </div>
+            `).join('');
+        } catch (error) {
+            container.innerHTML = `<div style="color:#ff8888;padding:10px;">${escapeHTML(error.message)}</div>`;
+        }
+    }
+
+    async function addRemixBackend() {
+        const name = document.getElementById('remix-backend-new-name').value.trim();
+        const baseUrl = document.getElementById('remix-backend-new-url').value.trim();
+        try {
+            await remixApi('/galleryout/api/remix/backends', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name, base_url: baseUrl})
+            });
+            document.getElementById('remix-backend-new-name').value = '';
+            document.getElementById('remix-backend-new-url').value = '';
+            await loadRemixBackends();
+        } catch (error) {
+            remixManagerMessage(error.message, true);
+        }
+    }
+
+    async function saveRemixBackend(id) {
+        try {
+            await remixApi(`/galleryout/api/remix/backends/${id}`, {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    name: document.getElementById(`backend-name-${id}`).value,
+                    base_url: document.getElementById(`backend-url-${id}`).value,
+                    enabled: document.getElementById(`backend-enabled-${id}`).checked
+                })
+            });
+            await loadRemixBackends();
+        } catch (error) {
+            remixManagerMessage(error.message, true);
+        }
+    }
+
+    async function moveRemixBackend(index, delta) {
+        const next = index + delta;
+        if (next < 0 || next >= remixBackendRows.length) return;
+        const ordered = remixBackendRows.map(row => row.id);
+        [ordered[index], ordered[next]] = [ordered[next], ordered[index]];
+        try {
+            await remixApi('/galleryout/api/remix/backends/reorder', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({backend_ids: ordered})
+            });
+            await loadRemixBackends();
+        } catch (error) {
+            remixManagerMessage(error.message, true);
+        }
+    }
+
+    async function testRemixBackend(id) {
+        try {
+            const data = await remixApi(`/galleryout/api/remix/backends/${id}/test`, {method: 'POST'});
+            remixManagerMessage(`Backend is ${data.health_status}.`);
+        } catch (error) {
+            remixManagerMessage(error.message, true);
+        }
+        await loadRemixBackends();
+    }
+
+    async function deleteRemixBackend(id) {
+        if (!window.confirm('Delete this backend configuration?')) return;
+        try {
+            await remixApi(`/galleryout/api/remix/backends/${id}`, {method: 'DELETE'});
+            await loadRemixBackends();
+        } catch (error) {
+            remixManagerMessage(error.message, true);
+        }
+    }
+
+    async function loadRemixJobs() {
+        const container = document.getElementById('remix-job-list');
+        try {
+            const data = await remixApi('/galleryout/api/remix/jobs?limit=50');
+            const jobs = data.jobs || [];
+            if (!jobs.length) {
+                container.innerHTML = '<div style="padding:14px;color:#888;text-align:center;">No Remix jobs yet.</div>';
+                return;
+            }
+            container.innerHTML = jobs.map(job => {
+                const outputs = (job.output_files || []).map(path => path.replace(/\\/g, '/').split('/').pop()).join(', ');
+                const canRetry = job.status === 'failed' || job.status === 'cancelled';
+                const canCancel = job.status === 'pending';
+                return `
+                    <div style="padding:9px 11px;background:#0c0c0c;border:1px solid #333;border-radius:7px;margin-bottom:6px;display:flex;justify-content:space-between;gap:12px;align-items:center;">
+                        <div style="min-width:0;">
+                            <div><strong style="color:#ddd;">${job.id.slice(0,8)}</strong> <span style="color:var(--primary-color);">${escapeHTML(job.status)}</span> <span style="color:#777;">${escapeHTML(job.backend_name || 'waiting locally')}</span></div>
+                            <div style="font-size:.72rem;color:${job.error ? '#ff8888' : '#777'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:650px;" title="${escapeHTML(job.error || outputs)}">${escapeHTML(job.error || outputs || new Date(job.created_at * 1000).toLocaleString())}</div>
+                        </div>
+                        <div style="display:flex;gap:5px;">
+                            ${canRetry ? `<button class="glass-btn" onclick="retryRemixJob('${job.id}')" style="padding:3px 8px;">Retry</button>` : ''}
+                            ${canCancel ? `<button class="glass-btn" onclick="cancelRemixJob('${job.id}')" style="padding:3px 8px;color:#ff8888;">Cancel</button>` : ''}
+                        </div>
+                    </div>`;
+            }).join('');
+        } catch (error) {
+            container.innerHTML = `<div style="color:#ff8888;padding:10px;">${escapeHTML(error.message)}</div>`;
+        }
+    }
+
+    async function retryRemixJob(id) {
+        try {
+            await remixApi(`/galleryout/api/remix/jobs/${id}/retry`, {method: 'POST'});
+            loadRemixJobs();
+        } catch (error) {
+            remixManagerMessage(error.message, true);
+        }
+    }
+
+    async function cancelRemixJob(id) {
+        try {
+            await remixApi(`/galleryout/api/remix/jobs/${id}/cancel`, {method: 'POST'});
+            loadRemixJobs();
+        } catch (error) {
+            remixManagerMessage(error.message, true);
+        }
     }
 
 </script>

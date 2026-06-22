@@ -47,6 +47,18 @@ from cryptography.fernet import Fernet
 import urllib.request 
 import secrets
 from typing import Dict, List, Any, Optional, Union # Added for type hinting in new tools
+from comfyui_client import ComfyUIClient, ComfyUIError
+from remix_backend import (
+    RemixBackendError,
+    create_remix_job,
+    create_backend,
+    delete_backend,
+    initialize_remix_schema,
+    list_backends,
+    reorder_backends,
+    update_backend,
+)
+from remix_dispatcher import RemixDispatcher
 try:
     from waitress import serve
     WAITRESS_AVAILABLE = True
@@ -381,7 +393,7 @@ def key_to_path(key):
     except Exception: return None
 
 # --- DERIVED SETTINGS ---
-DB_SCHEMA_VERSION = 27 
+DB_SCHEMA_VERSION = 28
 THUMBNAIL_CACHE_DIR = os.path.join(BASE_SMARTGALLERY_PATH, THUMBNAIL_CACHE_FOLDER_NAME)
 SQLITE_CACHE_DIR = os.path.join(BASE_SMARTGALLERY_PATH, SQLITE_CACHE_FOLDER_NAME)
 # Directory for metadata-stripped files (for client delivery)
@@ -392,6 +404,8 @@ ENCRYPTION_KEY_FILE = os.path.join(SQLITE_CACHE_DIR, 'system.key')
 ZIP_CACHE_DIR = os.path.join(BASE_SMARTGALLERY_PATH, ZIP_CACHE_FOLDER_NAME)
 IMPORTED_WORKFLOWS_FOLDER_NAME = '.imported_workflows'
 IMPORTED_WORKFLOWS_DIR = os.path.join(BASE_SMARTGALLERY_PATH, IMPORTED_WORKFLOWS_FOLDER_NAME)
+REMIX_OUTPUT_DIR = os.path.join(BASE_OUTPUT_PATH, 'Remix')
+REMIX_SPOOL_DIR = os.path.join(BASE_SMARTGALLERY_PATH, '.remix_spool')
 PROTECTED_FOLDER_KEYS = {path_to_key(f) for f in SPECIAL_FOLDERS}
 PROTECTED_FOLDER_KEYS.add('_root_')
 
@@ -582,6 +596,25 @@ def management_api_only(f):
             return jsonify({
                 'status': 'error', 
                 'message': 'Security Lockdown: This API is physically disabled in Exhibition Mode.'
+            }), 403
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def backend_admin_api_only(f):
+    """Allow backend configuration only to local implicit admins or managers."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if IS_EXHIBITION_MODE:
+            return jsonify({
+                'status': 'error',
+                'message': 'Security Lockdown: This API is physically disabled in Exhibition Mode.'
+            }), 403
+        is_implicit_admin = not FORCE_LOGIN
+        if not is_implicit_admin and session.get('role') not in ['ADMIN', 'MANAGER']:
+            return jsonify({
+                'status': 'error',
+                'message': 'Administrator access is required.'
             }), 403
         return f(*args, **kwargs)
     return decorated_function
@@ -1665,6 +1698,67 @@ def get_db_connection():
     conn.execute('PRAGMA foreign_keys = ON;') 
     
     return conn
+
+
+def index_remix_outputs(paths):
+    """Index newly downloaded Remix outputs immediately."""
+    results = []
+    for path in paths:
+        result = process_single_file(path)
+        if result:
+            results.append(result)
+    if not results:
+        return
+    with get_db_connection() as conn:
+        conn.executemany(
+            """
+            INSERT INTO files
+                (id, path, mtime, name, type, duration, dimensions,
+                 has_workflow, size, last_scanned, workflow_files,
+                 workflow_prompt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                path = excluded.path,
+                mtime = excluded.mtime,
+                name = excluded.name,
+                type = excluded.type,
+                duration = excluded.duration,
+                dimensions = excluded.dimensions,
+                has_workflow = excluded.has_workflow,
+                size = excluded.size,
+                last_scanned = excluded.last_scanned,
+                workflow_files = excluded.workflow_files,
+                workflow_prompt = excluded.workflow_prompt
+            """,
+            results,
+        )
+        conn.commit()
+    get_dynamic_folder_config(force_refresh=True)
+
+
+def get_preferred_comfy_url():
+    try:
+        with get_db_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT base_url FROM remix_backends
+                WHERE enabled = 1
+                ORDER BY priority ASC, created_at ASC
+                LIMIT 1
+                """
+            ).fetchone()
+        if row:
+            return row['base_url']
+    except sqlite3.Error:
+        pass
+    return COMFYUI_SERVER_URL
+
+
+remix_dispatcher = RemixDispatcher(
+    get_db_connection,
+    REMIX_OUTPUT_DIR,
+    index_outputs=index_remix_outputs,
+)
     
 def init_db(conn=None):
     close_conn = False
@@ -1840,6 +1934,9 @@ def init_db(conn=None):
         ''')
         # Index for faster login lookups
         conn.execute('CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);')
+
+        # 6. REMIX REMOTE BACKENDS AND DURABLE JOB QUEUE
+        initialize_remix_schema(conn, COMFYUI_SERVER_URL)
         
         # --- MIGRATION: Add last_login to users table ---
         try:
@@ -1851,7 +1948,7 @@ def init_db(conn=None):
         except Exception as e:
             print(f"WARNING: Could not migrate users table: {e}")    
         
-        # 6. COLUMN MIGRATION
+        # 7. COLUMN MIGRATION
         required_columns = {
             'size': 'INTEGER DEFAULT 0', 
             'last_scanned': 'REAL DEFAULT 0',
@@ -1897,7 +1994,7 @@ def init_db(conn=None):
                 except Exception as e:
                     print(f"WARNING: Could not add column {col_name}: {e}")
 
-        # 6. SCHEMA VERSION
+        # 8. SCHEMA VERSION
         try:
             cur = conn.execute("PRAGMA user_version")
             current_ver = cur.fetchone()[0]
@@ -2482,6 +2579,8 @@ def initialize_gallery_fast_no_db_check():
     FFPROBE_EXECUTABLE_PATH = find_ffprobe_path()
     os.makedirs(THUMBNAIL_CACHE_DIR, exist_ok=True)
     os.makedirs(SQLITE_CACHE_DIR, exist_ok=True)
+    os.makedirs(REMIX_OUTPUT_DIR, exist_ok=True)
+    os.makedirs(REMIX_SPOOL_DIR, exist_ok=True)
     
     with get_db_connection() as conn:
         try:
@@ -2645,6 +2744,8 @@ def initialize_gallery():
     os.makedirs(SQLITE_CACHE_DIR, exist_ok=True)
     os.makedirs(CLEAN_CACHE_DIR, exist_ok=True)
     os.makedirs(IMPORTED_WORKFLOWS_DIR, exist_ok=True)
+    os.makedirs(REMIX_OUTPUT_DIR, exist_ok=True)
+    os.makedirs(REMIX_SPOOL_DIR, exist_ok=True)
     
     with get_db_connection() as conn:
         try:
@@ -5842,12 +5943,248 @@ def serve_storyboard_frame(file_hash, filename):
     return send_from_directory(directory, safe_name)
 # Route to serve the cached frames
 
+
+def _serialize_remix_backend(row):
+    backend = dict(row)
+    backend['enabled'] = bool(backend['enabled'])
+    return backend
+
+
+@app.route('/galleryout/api/remix/backends', methods=['GET', 'POST'])
+@backend_admin_api_only
+def api_remix_backends():
+    with get_db_connection() as conn:
+        if request.method == 'GET':
+            return jsonify({
+                'status': 'success',
+                'backends': [
+                    _serialize_remix_backend(row) for row in list_backends(conn)
+                ],
+            })
+
+        data = request.get_json(silent=True) or {}
+        try:
+            backend_id = create_backend(
+                conn,
+                data.get('name'),
+                data.get('base_url'),
+                data.get('enabled', True),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM remix_backends WHERE id = ?",
+                (backend_id,),
+            ).fetchone()
+            return jsonify({
+                'status': 'success',
+                'backend': _serialize_remix_backend(row),
+            }), 201
+        except RemixBackendError as exc:
+            return jsonify({'status': 'error', 'message': str(exc)}), 400
+
+
+@app.route('/galleryout/api/remix/backends/<string:backend_id>', methods=['PUT', 'DELETE'])
+@backend_admin_api_only
+def api_remix_backend_detail(backend_id):
+    with get_db_connection() as conn:
+        try:
+            if request.method == 'DELETE':
+                if not delete_backend(conn, backend_id):
+                    return jsonify({
+                        'status': 'error',
+                        'message': 'Backend not found.',
+                    }), 404
+                conn.commit()
+                return jsonify({'status': 'success'})
+
+            data = request.get_json(silent=True) or {}
+            if not update_backend(
+                conn,
+                backend_id,
+                name=data.get('name'),
+                base_url=data.get('base_url'),
+                enabled=data.get('enabled', True),
+            ):
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Backend not found.',
+                }), 404
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM remix_backends WHERE id = ?",
+                (backend_id,),
+            ).fetchone()
+            return jsonify({
+                'status': 'success',
+                'backend': _serialize_remix_backend(row),
+            })
+        except RemixBackendError as exc:
+            return jsonify({'status': 'error', 'message': str(exc)}), 409
+
+
+@app.route('/galleryout/api/remix/backends/reorder', methods=['POST'])
+@backend_admin_api_only
+def api_remix_backends_reorder():
+    data = request.get_json(silent=True) or {}
+    backend_ids = data.get('backend_ids')
+    if not isinstance(backend_ids, list):
+        return jsonify({
+            'status': 'error',
+            'message': 'backend_ids must be a list.',
+        }), 400
+    with get_db_connection() as conn:
+        try:
+            reorder_backends(conn, backend_ids)
+            conn.commit()
+            return jsonify({
+                'status': 'success',
+                'backends': [
+                    _serialize_remix_backend(row) for row in list_backends(conn)
+                ],
+            })
+        except RemixBackendError as exc:
+            return jsonify({'status': 'error', 'message': str(exc)}), 400
+
+
+@app.route('/galleryout/api/remix/backends/<string:backend_id>/test', methods=['POST'])
+@backend_admin_api_only
+def api_remix_backend_test(backend_id):
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM remix_backends WHERE id = ?",
+            (backend_id,),
+        ).fetchone()
+        if not row:
+            return jsonify({
+                'status': 'error',
+                'message': 'Backend not found.',
+            }), 404
+
+        checked_at = time.time()
+        try:
+            client = ComfyUIClient(row['base_url'], timeout=5)
+            stats = client.system_stats()
+            queue = client.queue()
+            busy = bool(queue.get('queue_running'))
+            health_status = 'busy' if busy else 'idle'
+            conn.execute(
+                """
+                UPDATE remix_backends
+                SET health_status = ?, last_checked = ?, last_error = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (health_status, checked_at, checked_at, backend_id),
+            )
+            conn.commit()
+            return jsonify({
+                'status': 'success',
+                'health_status': health_status,
+                'busy': busy,
+                'system_stats': stats,
+            })
+        except (ComfyUIError, ValueError) as exc:
+            conn.execute(
+                """
+                UPDATE remix_backends
+                SET health_status = 'offline', last_checked = ?,
+                    last_error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (checked_at, str(exc), checked_at, backend_id),
+            )
+            conn.commit()
+            return jsonify({
+                'status': 'error',
+                'health_status': 'offline',
+                'message': str(exc),
+            }), 502
+
+
+@app.route('/galleryout/api/remix/jobs', methods=['GET'])
+@management_api_only
+def api_remix_jobs():
+    limit = min(max(request.args.get('limit', 50, type=int), 1), 200)
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT j.id, j.source_file_id, j.backend_id, j.comfy_prompt_id,
+                   j.status, j.attempts, j.error, j.created_at, j.updated_at,
+                   j.started_at, j.completed_at, j.output_files_json,
+                   b.name AS backend_name
+            FROM remix_jobs j
+            LEFT JOIN remix_backends b ON b.id = j.backend_id
+            ORDER BY j.created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    jobs = []
+    for row in rows:
+        job = dict(row)
+        try:
+            job['output_files'] = json.loads(job.pop('output_files_json') or '[]')
+        except json.JSONDecodeError:
+            job['output_files'] = []
+            job.pop('output_files_json', None)
+        jobs.append(job)
+    return jsonify({'status': 'success', 'jobs': jobs})
+
+
+@app.route('/galleryout/api/remix/jobs/<string:job_id>/retry', methods=['POST'])
+@management_api_only
+def api_remix_job_retry(job_id):
+    with get_db_connection() as conn:
+        now = time.time()
+        cursor = conn.execute(
+            """
+            UPDATE remix_jobs
+            SET status = 'pending', backend_id = NULL, comfy_prompt_id = NULL,
+                error = NULL, updated_at = ?, started_at = NULL,
+                completed_at = NULL, output_files_json = '[]'
+            WHERE id = ? AND status IN ('failed', 'cancelled')
+            """,
+            (now, job_id),
+        )
+        conn.commit()
+    if cursor.rowcount == 0:
+        return jsonify({
+            'status': 'error',
+            'message': 'Only failed or cancelled jobs can be retried.',
+        }), 409
+    remix_dispatcher.wake()
+    return jsonify({'status': 'success'})
+
+
+@app.route('/galleryout/api/remix/jobs/<string:job_id>/cancel', methods=['POST'])
+@management_api_only
+def api_remix_job_cancel(job_id):
+    with get_db_connection() as conn:
+        now = time.time()
+        cursor = conn.execute(
+            """
+            UPDATE remix_jobs
+            SET status = 'cancelled', error = 'Cancelled by user',
+                updated_at = ?, completed_at = ?
+            WHERE id = ? AND status = 'pending'
+            """,
+            (now, now, job_id),
+        )
+        conn.commit()
+    if cursor.rowcount == 0:
+        return jsonify({
+            'status': 'error',
+            'message': 'Only locally pending jobs can be cancelled safely.',
+        }), 409
+    return jsonify({'status': 'success'})
+
+
 @app.route('/galleryout/api/remix/object_info', methods=['POST'])
 @management_api_only
 def api_remix_object_info():
     try:
-        target_url = request.json.get('target_url', COMFYUI_SERVER_URL).strip()
-        if not target_url: target_url = COMFYUI_SERVER_URL
+        data = request.get_json(silent=True) or {}
+        target_url = (data.get('target_url') or get_preferred_comfy_url()).strip()
         req = urllib.request.Request(f"{target_url.rstrip('/')}/object_info", headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=10) as r:
             return Response(r.read(), mimetype='application/json')
@@ -7912,7 +8249,7 @@ def _register_remix_routes_inline():
                 extract['has_ui'] = bool(raw_ui) and len(_ui_nodes) > 0
             except Exception: extract['has_ui'] = False
 
-            extract['default_comfy_url'] = COMFYUI_SERVER_URL
+            extract['default_comfy_url'] = get_preferred_comfy_url()
             extract['custom_app'] = sg_meta.get('custom_app', [])
             extract['favorite_nodes'] = sg_meta.get('favorite_nodes', {})
             if extract['custom_app']:
@@ -7929,6 +8266,8 @@ def _register_remix_routes_inline():
         try:
             file_id = request.form.get('file_id')
             action_req = request.form.get('action_type', 'api')
+            queued_job_id = str(uuid.uuid4())
+            queued_input_files = []
             modifications = json.loads(request.form.get('modifications', '{}'))
             wf_type = request.form.get('workflow_type', 'api')
             target_comfy_url = request.form.get('target_url', COMFYUI_SERVER_URL).strip()
@@ -7960,13 +8299,39 @@ def _register_remix_routes_inline():
                     if mod['node_id'] in wf_data: wf_data[mod['node_id']]['inputs'][mod.get('key', 'text')] = mod['value']
                 for mod in modifications.get('seeds', []) + modifications.get('numbers', []):
                     if mod['node_id'] in wf_data: wf_data[mod['node_id']]['inputs'][mod['key']] = mod['value']
-                if 'image_upload' in request.files and modifications.get('image_node_id'):
-                    img_file = request.files['image_upload']
-                    if img_file.filename:
-                        filename = secure_filename("remix_" + img_file.filename)
-                        img_file.save(os.path.join(BASE_INPUT_PATH, filename))
-                        img_node_id = modifications['image_node_id']
-                        if img_node_id in wf_data: wf_data[img_node_id]['inputs'][modifications.get('image_key', 'image')] = filename
+                upload_files = request.files.getlist('image_upload')
+                upload_meta = modifications.get('image_uploads') or []
+                if not upload_meta and modifications.get('image_node_id'):
+                    upload_meta = [{
+                        'node_id': modifications['image_node_id'],
+                        'key': modifications.get('image_key', 'image'),
+                    }]
+                for upload_index, (img_file, image_meta) in enumerate(
+                    zip(upload_files, upload_meta)
+                ):
+                    if img_file and img_file.filename:
+                        safe_original = secure_filename(img_file.filename) or "input.png"
+                        filename = (
+                            f"remix_{queued_job_id[:8]}_{upload_index + 1}_"
+                            f"{safe_original}"
+                        )
+                        if action_req == 'api':
+                            local_path = os.path.join(
+                                REMIX_SPOOL_DIR,
+                                f"{queued_job_id}_{upload_index + 1}_{safe_original}",
+                            )
+                            img_file.save(local_path)
+                            queued_input_files.append({
+                                'local_path': local_path,
+                                'remote_name': filename,
+                                'node_id': str(image_meta['node_id']),
+                                'key': image_meta.get('key', 'image'),
+                            })
+                        else:
+                            img_file.save(os.path.join(BASE_INPUT_PATH, filename))
+                        img_node_id = str(image_meta['node_id'])
+                        if img_node_id in wf_data:
+                            wf_data[img_node_id]['inputs'][image_meta.get('key', 'image')] = filename
             else:
                 nodes = wf_data.get('nodes', []) if isinstance(wf_data, dict) else wf_data
                 all_mods = modifications.get('texts', []) + modifications.get('seeds', []) + modifications.get('numbers', [])
@@ -8020,30 +8385,49 @@ def _register_remix_routes_inline():
 
             if action_req == 'api':
                 if wf_type == 'ui': return jsonify({'status': 'error', 'message': 'Cannot queue UI-format workflow via API. Use Copy/Download instead.'}), 400
-                if not target_comfy_url: return jsonify({'status': 'error', 'message': 'ComfyUI URL is required.'}), 400
-                try:
-                    ping_req = urllib.request.Request(f"{target_comfy_url.rstrip('/')}/system_stats", headers={'Content-Type': 'application/json'})
-                    urllib.request.urlopen(ping_req, timeout=4)
-                except urllib.error.URLError:
-                    return jsonify({'status': 'error', 'message': f'Cannot reach ComfyUI at {target_comfy_url}.'}), 502
-                except Exception: pass
 
                 invalid_nodes = []
                 for node_id, node_val in wf_data.items():
                     if not isinstance(node_val, dict) or 'class_type' not in node_val or 'inputs' not in node_val: invalid_nodes.append(str(node_id))
-                if invalid_nodes: return jsonify({'status': 'error', 'message': 'Workflow data is not in valid ComfyUI API format.'}), 400
+                if invalid_nodes:
+                    for item in queued_input_files:
+                        try: os.remove(item['local_path'])
+                        except OSError: pass
+                    return jsonify({'status': 'error', 'message': 'Workflow data is not in valid ComfyUI API format.'}), 400
 
-                payload = json.dumps({"prompt": wf_data}).encode('utf-8')
-                req = urllib.request.Request(f"{target_comfy_url.rstrip('/')}/prompt", data=payload, headers={'Content-Type': 'application/json'})
-                try:
-                    with urllib.request.urlopen(req, timeout=5) as response:
-                        resp_data = json.loads(response.read().decode('utf-8'))
-                        job_id = resp_data.get('prompt_id', 'Unknown')
-                        return jsonify({'status': 'success', 'action': 'queued', 'message': f'Job queued! ID: {job_id}'})
-                except urllib.error.HTTPError as e: return jsonify({'status': 'error', 'message': f'ComfyUI rejected the workflow: HTTP {e.code}'}), 400
-                except urllib.error.URLError as e: return jsonify({'status': 'error', 'message': 'Failed to connect to ComfyUI.'}), 502
+                with get_db_connection() as conn:
+                    enabled_count = conn.execute(
+                        "SELECT COUNT(*) FROM remix_backends WHERE enabled = 1"
+                    ).fetchone()[0]
+                    if enabled_count == 0:
+                        for item in queued_input_files:
+                            try: os.remove(item['local_path'])
+                            except OSError: pass
+                        return jsonify({
+                            'status': 'error',
+                            'message': 'No enabled ComfyUI backends are configured.',
+                        }), 400
+                    create_remix_job(
+                        conn,
+                        wf_data,
+                        source_file_id=file_id,
+                        input_files=queued_input_files,
+                        job_id=queued_job_id,
+                    )
+                    conn.commit()
+                remix_dispatcher.wake()
+                return jsonify({
+                    'status': 'success',
+                    'action': 'queued',
+                    'job_id': queued_job_id,
+                    'message': f'Job added to SmartGallery queue: {queued_job_id[:8]}',
+                })
 
-        except Exception as e: return jsonify({'status': 'error', 'message': str(e)}), 500
+        except Exception as e:
+            for item in locals().get('queued_input_files', []):
+                try: os.remove(item['local_path'])
+                except OSError: pass
+            return jsonify({'status': 'error', 'message': str(e)}), 500
 
     def _convert_ui_to_api(ui_data, object_info):
         nodes = ui_data.get('nodes', [])
@@ -8119,7 +8503,7 @@ def _register_remix_routes_inline():
         try:
             file_id = request.form.get('file_id')
             companion_path = request.form.get('companion_path')
-            target_comfy_url = request.form.get('target_url', COMFYUI_SERVER_URL).strip()
+            target_comfy_url = get_preferred_comfy_url()
             workflow_override = request.form.get('workflow_file')
             
             if not target_comfy_url: return jsonify({'status': 'error', 'message': 'ComfyUI URL is required.'}), 400
@@ -8140,15 +8524,11 @@ def _register_remix_routes_inline():
                 if not nodes: return jsonify({'status': 'error', 'message': 'UI workflow contains no nodes.'}), 400
                 api_wf = _convert_ui_to_api(ui_data, object_info)
             if request.form.get('debug') == '1': return jsonify({'status': 'debug', 'converted': api_wf, 'object_info_keys': list(object_info.keys())})
-            payload = json.dumps({"prompt": api_wf}).encode('utf-8')
-            req = urllib.request.Request(f"{target_comfy_url.rstrip('/')}/prompt", data=payload, headers={'Content-Type': 'application/json'})
-            try:
-                with urllib.request.urlopen(req, timeout=5) as response:
-                    resp_data = json.loads(response.read().decode('utf-8'))
-                    job_id = resp_data.get('prompt_id', 'Unknown')
-                    return jsonify({'status': 'success', 'message': f'Autofix succeeded! Job ID: {job_id}'})
-            except urllib.error.HTTPError as e: return jsonify({'status': 'error', 'message': f'ComfyUI rejected it: HTTP {e.code}'}), 400
-            except urllib.error.URLError as e: return jsonify({'status': 'error', 'message': f'Failed to connect to ComfyUI.'}), 502
+            with get_db_connection() as conn:
+                job_id = create_remix_job(conn, api_wf, source_file_id=file_id)
+                conn.commit()
+            remix_dispatcher.wake()
+            return jsonify({'status': 'success', 'message': f'Autofix queued locally! Job ID: {job_id[:8]}'})
         except Exception as e: return jsonify({'status': 'error', 'message': f'Autofix error: {str(e)}'}), 500
 
     @app.route('/galleryout/api/remix/autofix_apply', methods=['POST'])
@@ -8158,7 +8538,7 @@ def _register_remix_routes_inline():
             file_id = request.form.get('file_id')
             companion_path = request.form.get('companion_path')
             choices_json = request.form.get('choices')
-            target_comfy_url = request.form.get('target_url', COMFYUI_SERVER_URL).strip()
+            target_comfy_url = get_preferred_comfy_url()
             workflow_override = request.form.get('workflow_file')
             
             if not choices_json: return jsonify({'status': 'error', 'message': 'Missing data.'}), 400
@@ -8177,15 +8557,11 @@ def _register_remix_routes_inline():
                 if n_id in api_wf:
                     api_wf[n_id]['inputs'][inp_name] = chosen
                     applied.append(f"[Node {n_id} ({c.get('node_title','')})] '{inp_name}' -> {repr(chosen)}")
-            payload = json.dumps({"prompt": api_wf}).encode('utf-8')
-            req = urllib.request.Request(f"{target_comfy_url.rstrip('/')}/prompt", data=payload, headers={'Content-Type': 'application/json'})
-            try:
-                with urllib.request.urlopen(req, timeout=5) as response:
-                    resp_data = json.loads(response.read().decode('utf-8'))
-                    job_id = resp_data.get('prompt_id', 'Unknown')
-                    return jsonify({'status': 'success', 'message': f'Queued successfully! Job ID: {job_id}<br><small>Applied: {" | ".join(applied)}</small>'})
-            except urllib.error.HTTPError as e: return jsonify({'status': 'error', 'message': f'ComfyUI rejected even after corrections: HTTP {e.code}'}), 400
-            except urllib.error.URLError as e: return jsonify({'status': 'error', 'message': f'Cannot reach ComfyUI.'}), 502
+            with get_db_connection() as conn:
+                job_id = create_remix_job(conn, api_wf, source_file_id=file_id)
+                conn.commit()
+            remix_dispatcher.wake()
+            return jsonify({'status': 'success', 'message': f'Queued locally! Job ID: {job_id[:8]}<br><small>Applied: {" | ".join(applied)}</small>'})
         except Exception as e: return jsonify({'status': 'error', 'message': str(e)}), 500
 
 _register_remix_routes_inline()
@@ -8334,6 +8710,13 @@ if __name__ == '__main__':
             print(f"{Colors.BLUE}INFO: AI Background Watcher started.{Colors.RESET}")
         except Exception as e:
             print(f"{Colors.RED}ERROR: Failed to start AI Watcher: {e}{Colors.RESET}")
+
+    if not IS_EXHIBITION_MODE:
+        try:
+            remix_dispatcher.start()
+            print(f"{Colors.BLUE}INFO: Remix backend dispatcher started.{Colors.RESET}")
+        except Exception as e:
+            print(f"{Colors.RED}ERROR: Failed to start Remix dispatcher: {e}{Colors.RESET}")
 
     print(f"{Colors.GREEN}{Colors.BOLD}🚀 Gallery started successfully!{Colors.RESET}")
     url_host = "localhost" if SERVER_PORT == 80 else "127.0.0.1"

@@ -1013,7 +1013,13 @@ No other software on the market offers this level of control. The **Nodepad** is
 ![Nodepad](assets/dictionary_lookup.png)
 
 #### The Workflow Library & Queueing
-Once you have pinned your fields and favorited your complex nodes inside **My Panel**, click **⭐ Save to Library**. You can recall these templates at any time from the main Tools menu without needing a source image. When ready, set your Generation Count, toggle the **Random Seed**, and click **🚀 Queue** to send the jobs to ComfyUI in the background.
+Once you have pinned your fields and favorited your complex nodes inside **My Panel**, click **⭐ Save to Library**. You can recall these templates at any time from the main Tools menu without needing a source image. When ready, set your Generation Count, toggle the **Random Seed**, and click **🚀 Queue**.
+
+SmartGallery keeps Remix jobs in a durable local queue. Open **🖥 Backends & Jobs** to add multiple LAN ComfyUI servers and order them from fastest to slowest. A job is sent only when a backend has no running or pending work; otherwise it waits locally until the first preferred backend becomes available. Jobs survive SmartGallery restarts.
+
+Remote input media is uploaded to the selected backend automatically. Final ComfyUI output images and videos are downloaded into `BASE_OUTPUT_PATH/Remix` with collision-resistant names and indexed immediately so they appear in the gallery. Temporary previews and intermediate files are not imported.
+
+`COMFYUI_SERVER_URL` remains supported as a bootstrap setting: on first migration it becomes the initial backend, and further backend management happens in the Remix UI.
 
 ![Queue](assets/remix_queue.png)
 
